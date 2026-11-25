@@ -38,7 +38,8 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install 'cryptography==50.0.2'
-          sdkmanager --install "ndk;$NDK_VERSION" 'platforms;android-36' 'build-tools;36.0.0'
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
+            --install "ndk;$NDK_VERSION" 'platforms;android-36' 'build-tools;36.0.0'
 
           # The project's builder picks the newest installed SDK, including previews.
           # Give it only the stable platform and build tools selected above.
