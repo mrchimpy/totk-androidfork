@@ -1,4 +1,4 @@
-"""Dataless thermal hysteresis and production guest-floor veneer regression."""
+"""Dataless Android thermal pacing and quick-menu capture regressions."""
 import json
 import os
 from pathlib import Path
@@ -45,6 +45,39 @@ class ThermalStep(unittest.TestCase):
     def test_patch_installation(self):
         payload = json.loads(self.compile_run('games/totk/runtime/test_thermal_patch.c', patch=True))
         self.assertEqual(len(bytes.fromhex(payload['code'])), 108)
+
+    def test_menu_capture_with_thermal_pacing(self):
+        self.compile_run('games/totk/runtime/test_menu_capture.c', patch=True)
+
+    def test_menu_capture_machine_semantics(self):
+        try:
+            from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
+            from unicorn.arm64_const import (UC_ARM64_REG_X0, UC_ARM64_REG_W8, UC_ARM64_REG_W9,
+                                             UC_ARM64_REG_NZCV, UC_ARM64_REG_PC)
+        except ImportError:
+            self.skipTest('Unicorn is required for ARM64 instruction semantics')
+        payload = json.loads(self.compile_run('games/totk/runtime/test_menu_capture.c', patch=True))
+        stub, resume, pane = payload['stub'], payload['resume'], 0x10000000
+        cpu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+        for page in (stub & ~4095, resume & ~4095, pane):
+            cpu.mem_map(page, 4096)
+        cpu.mem_write(stub, bytes.fromhex(payload['code']))
+        for requested, armed in ((0, 0), (0, 1), (1, 0), (1, 1), (0x40, 0x81)):
+            with self.subTest(requested=requested, armed=armed):
+                flags = bytes((requested, armed))
+                cpu.mem_write(pane + 0xd4, flags)
+                cpu.reg_write(UC_ARM64_REG_X0, pane)
+                # The C fixture verifies that the first word replays the game's
+                # own armed-byte load. Start with the value it would have read.
+                cpu.reg_write(UC_ARM64_REG_W8, armed)
+                cpu.reg_write(UC_ARM64_REG_W9, 0xdeadbeef)
+                cpu.reg_write(UC_ARM64_REG_NZCV, 0xa0000000)
+                cpu.emu_start(stub + 4, resume, count=3)
+                self.assertEqual(cpu.reg_read(UC_ARM64_REG_PC), resume)
+                self.assertEqual(cpu.reg_read(UC_ARM64_REG_W8), requested | armed)
+                self.assertEqual(cpu.reg_read(UC_ARM64_REG_W9), requested)
+                self.assertEqual(cpu.reg_read(UC_ARM64_REG_NZCV), 0xa0000000)
+                self.assertEqual(cpu.mem_read(pane + 0xd4, 2), flags)
 
     def test_patch_machine_semantics(self):
         try:

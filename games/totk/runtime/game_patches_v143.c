@@ -1041,12 +1041,66 @@ void runtime_diag_xpoke(unsigned off,float value){
     fprintf(stderr,"[totk] xpoke X+%#x: %g -> %g\n",off,old,value);
 }
 #endif
+/* Dorkington's scene-capture fix (AurelioB/totk-android#44). The quick menus
+ * ask for a snapshot of the world at pane+0xd4. Another job normally copies
+ * that request to the armed flag at +0xd5. If draw gets there first, waiting
+ * another frame captures the already-cleared scene. Let the original draw
+ * branch see either flag; the game still draws, blurs and clears the request. */
+static void patch_menu_capture(Module *m) {
+#if defined(__ANDROID__) || defined(TOTK_MENU_CAPTURE_TEST)
+    const char *setting = getenv("TOTK_MENU_CAPTURE_FIX");
+    if (setting && !strcmp(setting, "0")) {
+        fprintf(stderr, "[totk] 1.4.3 menu capture fix off\n");
+        return;
+    }
+    static const uint64_t sites[] = {0x105bbcc, 0x105bbd0};
+    uint32_t original[2];
+    if (m->text_end < sites[1] + 4 || m->text_end > m->patch_off ||
+        m->patch_off >= m->file_size || m->file_size > UINT64_MAX - 0x3fff) {
+        fprintf(stderr, "[totk] 1.4.3 menu capture fix skipped: module layout\n");
+        return;
+    }
+    /* The thermal step uses the end of the original text padding. Use the
+     * final rewritten-code RX page instead: grass reserves +0..127 and the
+     * benchmark clock uses +128..139. The loader flushes both RX regions. */
+    const uint64_t stub = ((m->file_size + 15) & ~15ULL) + 144;
+    const uint64_t rx_end = (m->file_size + 0x3fff) & ~0x3fffULL;
+    if (rx_end > m->size || stub + 16 > rx_end || stub + 12 > sites[1] + (1ULL << 27)) {
+        fprintf(stderr, "[totk] 1.4.3 menu capture fix skipped: veneer layout\n");
+        return;
+    }
+    if (!code_guard(m, sites, 2, sizeof *sites, original,
+                    "a5e2a3003d86bfbb936dc67e51990369aea8bf463786eea310b99463fc3a901d")) {
+        fprintf(stderr, "[totk] 1.4.3 menu capture fix skipped: instruction mismatch\n");
+        return;
+    }
+    static const uint32_t empty[4] = {0};
+    if (memcmp(m->base + stub, empty, sizeof empty)) {
+        fprintf(stderr, "[totk] 1.4.3 menu capture fix skipped: veneer space in use\n");
+        return;
+    }
+    const uint32_t code[] = {
+        original[0],                  /* original load of the armed byte into w8 */
+        0x39435009,                   /* ldrb w9,[x0,#0xd4] (w9 is scratch here) */
+        0x2a090108,                   /* orr w8,w8,w9 (preserves condition flags) */
+        branch(stub + 12, sites[1]),  /* resume at the original cbnz w8 */
+    };
+    const uint32_t redirect = branch(sites[0], stub);
+    memcpy(m->base + stub, code, sizeof code);
+    memcpy(m->base + sites[0], &redirect, sizeof redirect);
+    fprintf(stderr, "[totk] 1.4.3 menu capture fix enabled\n");
+#else
+    (void)m;
+#endif
+}
+
 static void patch_output_res(Module *m);
 static void patch_render_res(Module *m);
 void runtime_game_patches(Module *m) {
     runtime_survey_init(m);
     if (strcmp(m->name, "main")) runtime_fail("1.4.3 game patches expect main");
     patch_bench_time(m);
+    patch_menu_capture(m);
     patch_realtime(m);
     patch_output_res(m);
     patch_render_res(m);
