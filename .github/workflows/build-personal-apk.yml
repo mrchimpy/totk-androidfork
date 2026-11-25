@@ -1,0 +1,95 @@
+name: Build personal APK
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      NDK_VERSION: '28.2.13676358'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the selected branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v7
+        with:
+          python-version: '3.14'
+
+      - name: Set up .NET 10 for the shader translator
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/totk-dotnet
+        with:
+          dotnet-version: '10.0.x'
+          skip-lts-prepass: true
+
+      - name: Prepare Android build tools
+        run: |
+          set -euo pipefail
+          python -m pip install 'cryptography==50.0.2'
+          sdkmanager --install "ndk;$NDK_VERSION" 'platforms;android-36' 'build-tools;36.0.0'
+
+          # The project's builder picks the newest installed SDK, including previews.
+          # Give it only the stable platform and build tools selected above.
+          sdk="$RUNNER_TEMP/totk-sdk"
+          mkdir -p "$sdk/platforms" "$sdk/build-tools"
+          ln -s "$ANDROID_HOME/platforms/android-36" "$sdk/platforms/android-36"
+          ln -s "$ANDROID_HOME/build-tools/36.0.0" "$sdk/build-tools/36.0.0"
+
+      - name: Get the pinned Turnip driver from the upstream release
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 \
+            --output upstream.apk \
+            'https://github.com/AurelioB/totk-android/releases/download/v1.0.1/TotK-Native-1.0.1.apk'
+          printf '%s  upstream.apk\n' \
+            '5f590c91b3af683b26fea74c121890d7439d97b687ad4a34eff7660ca75399d5' | sha256sum --check
+          unzip -p upstream.apk lib/arm64-v8a/libtotk_turnip.so > turnip.so
+
+      - name: Build, sign and verify the personal APK
+        env:
+          TOTK_SIGNING_PFX_B64: ${{ secrets.TOTK_SIGNING_PFX_B64 }}
+          TOTK_SIGNING_PASSWORD: ${{ secrets.TOTK_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${TOTK_SIGNING_PFX_B64:?Add the TOTK_SIGNING_PFX_B64 repository secret}"
+          : "${TOTK_SIGNING_PASSWORD:?Add the TOTK_SIGNING_PASSWORD repository secret}"
+          umask 077
+          key="$RUNNER_TEMP/totk-personal.pfx"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$TOTK_SIGNING_PFX_B64" | base64 --decode > "$key"
+          unset TOTK_SIGNING_PFX_B64
+          openssl pkcs12 -in "$key" -passin env:TOTK_SIGNING_PASSWORD -noout
+
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          export DOTNET="$RUNNER_TEMP/totk-dotnet/dotnet"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          app_version=$(cd games/totk/android && python -c 'from build_release import APP_VERSION; print(APP_VERSION)')
+          python games/totk/android/build_release.py \
+            --android-sdk "$RUNNER_TEMP/totk-sdk" \
+            --ndk "$ANDROID_NDK_HOME" \
+            --turnip "$RUNNER_TEMP/turnip.so" \
+            --key "$key" --key-pass-env TOTK_SIGNING_PASSWORD \
+            --version-name "${app_version}-personal.${GITHUB_RUN_NUMBER}" \
+            --version-code "$((100000 + GITHUB_RUN_NUMBER))" \
+            --out TotK-Native-personal.apk
+
+      - name: Make the APK available to download
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: TotK-Native-personal.apk
+          archive: false
+          if-no-files-found: error
